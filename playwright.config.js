@@ -4,7 +4,7 @@ const path = require('path');
 
 module.exports = defineConfig({
   testDir: './tests',
-  testMatch: '**/*.test.js',
+  testMatch: '**/*.spec.js',
   timeout: 30000,
   retries: 0,
   workers: 1,

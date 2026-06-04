@@ -4684,11 +4684,32 @@ app.post('/api/update', requireRole('admin'), requireCsrf, (req, res) => {
   const promptPath = path.join(hermesHome, '.update_prompt.json');
   const responsePath = path.join(hermesHome, '.update_response');
 
+  // Track answered prompts to avoid duplicates
+  const answeredPrompts = new Set();
+
   // Watch for prompt file and auto-answer "Y"
   const answerInterval = setInterval(() => {
     try {
       if (fs.existsSync(promptPath)) {
         fs.writeFileSync(responsePath, 'Y');
+        // Read prompt content and stream to frontend
+        const promptRaw = fs.readFileSync(promptPath, 'utf8');
+        try {
+          const promptData = JSON.parse(promptRaw);
+          const promptText = promptData.prompt || promptData.question || promptRaw.trim();
+          const key = promptText.slice(0, 80);
+          if (!answeredPrompts.has(key)) {
+            answeredPrompts.add(key);
+            res.write(`data: ${JSON.stringify({ type: 'prompt', text: promptText, answered: 'Y' })}\n\n`);
+          }
+        } catch {
+          // If JSON parse fails, use raw text
+          const key = promptRaw.trim().slice(0, 80);
+          if (key && !answeredPrompts.has(key)) {
+            answeredPrompts.add(key);
+            res.write(`data: ${JSON.stringify({ type: 'prompt', text: promptRaw.trim(), answered: 'Y' })}\n\n`);
+          }
+        }
       }
     } catch {}
   }, 500);

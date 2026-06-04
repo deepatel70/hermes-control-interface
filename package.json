@@ -13,7 +13,8 @@
     "preview": "vite preview",
     "serve": "node server.js",
     "setup": "bash install.sh",
-    "test": "node --test",
+    "test": "node --test test/*.test.js",
+    "test:e2e": "npx playwright test",
     "reset-password": "node scripts/reset-password.js",
     "postinstall": "npm rebuild better-sqlite3",
     "changelog": "bash scripts/generate-changelog.sh"

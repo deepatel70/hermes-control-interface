@@ -842,6 +842,9 @@ async function gatewayAction(profile, action) {
 async function sseProgressModal(title, url, options = {}) {
   const { method = 'POST', headers = {}, body, autoCloseMs = 3000, onSuccess, onError } = options;
 
+  let overlayClosed = false; // track if user dismissed the modal
+  let safetyTimeout;
+
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.style.display = 'flex';
@@ -849,10 +852,10 @@ async function sseProgressModal(title, url, options = {}) {
     <div class="modal-card" style="width:520px;max-width:90vw;">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
         <div class="modal-title" style="margin:0;">${title}</div>
-        <button class="sse-modal-close" style="display:none;padding:4px 12px;font-size:11px;background:var(--bg-panel);border:1px solid var(--border);border-radius:var(--radius);color:var(--fg-muted);cursor:pointer;" data-i18n="auto.close2">✕ Close</button>
+        <button class="sse-modal-close" style="padding:4px 12px;font-size:11px;background:var(--bg-panel);border:1px solid var(--border);border-radius:var(--radius);color:var(--fg-muted);cursor:pointer;">✕ Close</button>
       </div>
       <div class="sse-progress-log" style="margin:12px 0;font-family:var(--font-mono,monospace);font-size:12px;line-height:1.8;max-height:300px;overflow-y:auto;background:var(--bg-inset);border-radius:6px;padding:12px;color:var(--fg-muted);white-space:pre-wrap;"></div>
-      <div class="sse-progress-status" style="font-size:11px;color:var(--fg-muted);" data-i18n="auto.starting">Starting...</div>
+      <div class="sse-progress-status" style="font-size:11px;color:var(--fg-muted);">Starting...</div>
     </div>`;
   document.body.appendChild(overlay);
 
@@ -861,16 +864,26 @@ async function sseProgressModal(title, url, options = {}) {
   const closeBtn = overlay.querySelector('.sse-modal-close');
   const addLine = (text) => { logEl.textContent += text + '\n'; logEl.scrollTop = logEl.scrollHeight; };
 
-  // Close button handler
-  closeBtn.onclick = () => overlay.remove();
+  // Reset safety timeout helper
+  const resetSafety = () => {
+    clearTimeout(safetyTimeout);
+    safetyTimeout = setTimeout(() => {
+      statusEl.textContent = '⚠ No activity for 120s — closing';
+      statusEl.style.color = 'var(--amber)';
+      closeBtn.style.display = '';
+      setTimeout(() => { if (!overlayClosed) overlay.remove(); }, 3000);
+    }, 120000);
+  };
 
-  // Safety timeout — auto-close after 120s even if no event received
-  const safetyTimeout = setTimeout(() => {
-    statusEl.textContent = '⚠ Timed out — closing';
-    statusEl.style.color = 'var(--amber)';
-    closeBtn.style.display = '';
-    setTimeout(() => overlay.remove(), 3000);
-  }, 120000);
+  // Close button handler — dismiss modal, keep SSE alive
+  closeBtn.onclick = () => {
+    overlayClosed = true;
+    overlay.remove();
+    showToast('Update continues in background — you\'ll be notified when complete', 'info');
+  };
+
+  // Set initial safety timeout
+  resetSafety();
 
   try {
     const fetchOpts = { method, headers, credentials: 'include' };
@@ -882,10 +895,13 @@ async function sseProgressModal(title, url, options = {}) {
     if (contentType.includes('application/json')) {
       const data = await res.json();
       const errMsg = data.error || data.message || 'Failed';
-      statusEl.textContent = '❌ ' + errMsg;
-      statusEl.style.color = 'var(--danger)';
+      if (!overlayClosed) {
+        statusEl.textContent = '❌ ' + errMsg;
+        statusEl.style.color = 'var(--danger)';
+      }
       if (onError) onError(data);
-      setTimeout(() => overlay.remove(), 3000);
+      clearTimeout(safetyTimeout);
+      if (!overlayClosed) setTimeout(() => overlay.remove(), 3000);
       return;
     }
 
@@ -907,52 +923,74 @@ async function sseProgressModal(title, url, options = {}) {
           const data = JSON.parse(line.slice(6));
           if (data.type === 'progress') {
             const text = data.line.replace(/\r/g, '');
-            statusEl.textContent = text;
-            statusEl.style.color = 'var(--accent)';
-            addLine(text);
-          } else if (data.type === 'done') {
-            statusEl.textContent = '✅ Complete!';
-            statusEl.style.color = 'var(--success)';
-            if (data.output) {
-              // Show summary lines
-              const summary = data.output.split('\n').filter(l =>
-                l.includes('complete') || l.includes('Complete') || l.includes('restored') ||
-                l.includes('Files:') || l.includes('Compressed:') || l.includes('Time:') ||
-                l.includes('Original:') || l.includes('Target:') || l.includes('Profile')
-              ).join('\n');
-              if (summary) addLine('\n' + summary);
+            if (!overlayClosed) {
+              statusEl.textContent = text;
+              statusEl.style.color = 'var(--accent)';
+              addLine(text);
             }
-            if (data.message) addLine(data.message);
-            if (data.path) {
-              const a = document.createElement('a');
-              a.href = `/api/backup/download?path=${encodeURIComponent(data.path)}`;
-              a.download = data.filename || 'backup.zip';
-              document.body.appendChild(a);
-              a.click();
-              a.remove();
+            resetSafety(); // reset timeout on every progress event
+          } else if (data.type === 'prompt') {
+            // Show the auto-answered prompt
+            const promptLine = `🤖 Auto: ${data.text}`;
+            if (!overlayClosed) {
+              addLine(promptLine);
+            }
+            resetSafety();
+          } else if (data.type === 'done') {
+            clearTimeout(safetyTimeout);
+            if (overlayClosed) {
+              // Modal already dismissed — show toast notification
+              showToast('✅ Hermes update complete!', 'success');
+            } else {
+              statusEl.textContent = '✅ Complete!';
+              statusEl.style.color = 'var(--success)';
+              if (data.output) {
+                const summary = data.output.split('\n').filter(l =>
+                  l.includes('complete') || l.includes('Complete') || l.includes('restored') ||
+                  l.includes('Files:') || l.includes('Compressed:') || l.includes('Time:') ||
+                  l.includes('Original:') || l.includes('Target:') || l.includes('Profile')
+                ).join('\n');
+                if (summary) addLine('\n' + summary);
+              }
+              if (data.message) addLine(data.message);
+              if (data.path) {
+                const a = document.createElement('a');
+                a.href = `/api/backup/download?path=${encodeURIComponent(data.path)}`;
+                a.download = data.filename || 'backup.zip';
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+              }
+              closeBtn.style.display = '';
+              setTimeout(() => overlay.remove(), autoCloseMs);
             }
             if (onSuccess) onSuccess(data);
-            clearTimeout(safetyTimeout);
-            closeBtn.style.display = '';
-            setTimeout(() => overlay.remove(), autoCloseMs);
           } else if (data.type === 'error') {
-            statusEl.textContent = '❌ ' + (data.message || 'Failed');
-            statusEl.style.color = 'var(--danger)';
-            if (data.output) addLine(data.output);
-            if (onError) onError(data);
             clearTimeout(safetyTimeout);
-            closeBtn.style.display = '';
-            setTimeout(() => overlay.remove(), 5000);
+            if (overlayClosed) {
+              showToast('❌ Hermes update failed: ' + (data.message || 'Unknown error'), 'error');
+            } else {
+              statusEl.textContent = '❌ ' + (data.message || 'Failed');
+              statusEl.style.color = 'var(--danger)';
+              if (data.output) addLine(data.output);
+              closeBtn.style.display = '';
+              setTimeout(() => overlay.remove(), 5000);
+            }
+            if (onError) onError(data);
           }
         } catch {}
       }
     }
   } catch (e) {
-    statusEl.textContent = '❌ Error: ' + e.message;
-    statusEl.style.color = 'var(--danger)';
     clearTimeout(safetyTimeout);
-    closeBtn.style.display = '';
-    setTimeout(() => overlay.remove(), 3000);
+    if (overlayClosed) {
+      showToast('❌ Update connection lost: ' + e.message, 'error');
+    } else {
+      statusEl.textContent = '❌ Error: ' + e.message;
+      statusEl.style.color = 'var(--danger)';
+      closeBtn.style.display = '';
+      setTimeout(() => overlay.remove(), 3000);
+    }
   }
 }
 
